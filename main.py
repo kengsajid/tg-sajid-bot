@@ -1,8 +1,6 @@
 import os
 import logging
-from threading import Thread
-from flask import Flask
-
+from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -18,7 +16,11 @@ BOT_TOKEN = "8756854734:AAHi8fbHKhfAO4iRaIjmmvYry-ADBHdOvSk"
 ADMIN_ID = 7651714631
 SALES_CHANNEL = "@sajidsells"
 
-# In-Memory Storage (Cloud Memory)
+# Render Web Service URL (Aapki app ka URL yahan automatic aayega ya aap dal sakte hain)
+# Render aapko ek URL deta hai jaise: https://tg-sajid-bot.onrender.com
+PORT = int(os.environ.get("PORT", 5000))
+
+# In-Memory Storage
 user_balances = {}
 server_1_stock = []
 server_2_stock = []
@@ -26,16 +28,8 @@ pending_topups = {}
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- FLASK WEB SERVER (For Render Keep-Alive) ---
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "TG SAJID API BOT is Running 24/7 on Render!"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+# --- TELEGRAM APP SETUP ---
+telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 # --- START / MAIN MENU ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -107,14 +101,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.edit_text(f"❌ **{server_name} is currently OUT OF STOCK!**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
             return
 
-        # Deliver Account
         account_data = stock_list.pop(0)
         user_balances[user_id] -= price
 
         keyboard = [[InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")]]
         await query.message.edit_text(f"✅ **PURCHASE SUCCESSFUL!**\n\n🖥 **Server:** {server_name}\n💰 **Price:** ₹{price}\n\n📦 **Account Details:**\n`{account_data}`", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-        # Broadcast to Sales Channel
         try:
             broadcast_msg = f"⚡ **NEW SALE — SUCCESS!** ⚡\n\n🛒 **Item:** {server_name} Account\n💵 **Price:** ₹{price}\n👤 **Buyer ID:** `{user_id}`\n\n🤖 @{context.bot.username}"
             await context.bot.send_message(chat_id=SALES_CHANNEL, text=broadcast_msg, parse_mode="Markdown")
@@ -126,7 +118,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("🔙 Cancel", callback_data="main_menu")]]
         await query.message.edit_text("💳 **UPI TOP-UP**\n\nPlease enter the amount you want to add (e.g. `100`):", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-    # ADMIN ACTIONS
     elif data.startswith("approve_") or data.startswith("reject_"):
         if user_id != ADMIN_ID:
             return
@@ -180,7 +171,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text or ""
 
-    # Admin Adding Stock
     if user_id == ADMIN_ID and context.user_data.get('adding_stock'):
         target_server = context.user_data.pop('adding_stock')
         if target_server == "s1":
@@ -191,7 +181,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Account successfully added to **SERVER 2**!")
         return
 
-    # User Topup Amount
     if context.user_data.get('awaiting_topup'):
         try:
             amount = float(text)
@@ -205,7 +194,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Please enter a valid positive number.")
         return
 
-    # User Screenshot / UTR Submission
     if context.user_data.get('awaiting_screenshot'):
         amount = context.user_data.pop('topup_amount', 0)
         context.user_data.pop('awaiting_screenshot')
@@ -218,7 +206,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("❌ Reject", callback_data=f"reject_{req_id}")]
         ]
         
-        # Notify Admin
         admin_text = f"🔔 **NEW TOP-UP REQUEST**\n\n👤 **User ID:** `{user_id}`\n💵 **Amount:** ₹{amount}"
         if update.message.photo:
             photo_file = update.message.photo[-1].file_id
@@ -229,24 +216,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text("⏳ Payment proof submitted! Admin approval ka wait karein.")
 
-def main():
-    # Background Flask Web Server Thread
-    server_thread = Thread(target=run_flask)
-    server_thread.daemon = True
-    server_thread.start()
+# Register Handlers
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("admin", admin))
+telegram_app.add_handler(CallbackQueryHandler(admin_button_handler, pattern="^(add_s1|add_s2|check_stock)$"))
+telegram_app.add_handler(CallbackQueryHandler(button_handler))
+telegram_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    # Telegram Bot Runner
-    tg_app = ApplicationBuilder().token(BOT_TOKEN).build()
+# --- FLASK WEB SERVER (Main Process) ---
+app = Flask(__name__)
 
-    tg_app.add_handler(CommandHandler("start", start))
-    tg_app.add_handler(CommandHandler("admin", admin))
-    tg_app.add_handler(CallbackQueryHandler(admin_button_handler, pattern="^(add_s1|add_s2|check_stock)$"))
-    tg_app.add_handler(CallbackQueryHandler(button_handler))
-    tg_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+@app.route('/')
+def home():
+    return "TG SAJID API BOT is Running 24/7 on Render via Webhook!"
 
-    print("Bot is running...")
-    tg_app.run_polling()
+@app.route(f"/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    json_data = request.get_json(force=True)
+    update = Update.de_json(json_data, telegram_app.bot)
+    # Process update asynchronously/synchronously in background loop or event loop
+    import asyncio
+    asyncio.run(telegram_app.process_update(update))
+    return "OK", 200
 
 if __name__ == '__main__':
-    main()
-        
+    # Set Webhook automatically using Render URL if available, or just run flask
+    import requests
+    render_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if render_url:
+        webhook_url = f"{render_url}/{BOT_TOKEN}"
+        telegram_app.bot.set_webhook(webhook_url)
+        print(f"Webhook set to: {webhook_url}")
+
+    print(f"Starting Flask server on port {PORT}...")
+    app.run(host="0.0.0.0", port=PORT)
